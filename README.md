@@ -1,114 +1,38 @@
-# s4t-provider
-// TODO(user): Add simple overview of use/purpose
+# provider-s4t
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`provider-s4t` is a minimal [Crossplane](https://crossplane.io/) Provider
+that is meant to be used as a s4t for implementing new Providers. It comes
+with the following features that are meant to be refactored:
 
-## Getting Started
+- A `ProviderConfig` type that only points to a credentials `Secret`.
+- A `MyType` resource type that serves as an example managed resource.
+- A managed resource controller that reconciles `MyType` objects and simply
+  prints their configuration in its `Observe` method.
 
-### Prerequisites
-- go version v1.22.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+## Developing
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
-
-```sh
-make docker-build docker-push IMG=<some-registry>/s4t-provider:tag
+1. Use this repository as a s4t to create a new one.
+1. Run `make submodules` to initialize the "build" Make submodule we use for CI/CD.
+1. Rename the provider by running the following command:
+```shell
+  export provider_name=MyProvider # Camel case, e.g. GitHub
+  make provider.prepare provider=${provider_name}
 ```
-
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
-
-**Install the CRDs into the cluster:**
-
-```sh
-make install
+4. Add your new type by running the following command:
+```shell
+  export group=sample # lower case e.g. core, cache, database, storage, etc.
+  export type=MyType # Camel casee.g. Bucket, Database, CacheCluster, etc.
+  make provider.addtype provider=${provider_name} group=${group} kind=${type}
 ```
+5. Replace the *sample* group with your new group in apis/{provider}.go
+5. Replace the *mytype* type with your new type in internal/controller/{provider}.go
+5. Replace the default controller and ProviderConfig implementations with your own
+5. Run `make reviewable` to run code generation, linters, and tests.
+5. Run `make build` to build the provider.
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+Refer to Crossplane's [CONTRIBUTING.md] file for more information on how the
+Crossplane community prefers to work. The [Provider Development][provider-dev]
+guide may also be of use.
 
-```sh
-make deploy IMG=<some-registry>/s4t-provider:tag
-```
-
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
-```
-
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following are the steps to build the installer and distribute this project to users.
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/s4t-provider:tag
-```
-
-NOTE: The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without
-its dependencies.
-
-2. Using the installer
-
-Users can just run kubectl apply -f <URL for YAML BUNDLE> to install the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/s4t-provider/<tag or branch>/dist/install.yaml
-```
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2024.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+[CONTRIBUTING.md]: https://github.com/crossplane/crossplane/blob/master/CONTRIBUTING.md
+[provider-dev]: https://github.com/crossplane/crossplane/blob/master/contributing/guide-provider-development.md
