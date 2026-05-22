@@ -3,10 +3,6 @@ set -e
 
 MARKER_FILE=/etc/keystone/.bootstrapped
 
-: "${KEYSTONE_ENTRYPOINT_ADMIN_PASSWORD:?KEYSTONE_ENTRYPOINT_ADMIN_PASSWORD is required}"
-: "${KEYSTONE_ENTRYPOINT_IOTRONIC_USER_PASSWORD:?KEYSTONE_ENTRYPOINT_IOTRONIC_USER_PASSWORD is required}"
-: "${S4T_PLATFORM_USER_PASSWORD:?S4T_PLATFORM_USER_PASSWORD is required}"
-
 echo ">>> Keystone entrypoint avviato"
 
 if [ ! -f "$MARKER_FILE" ]; then
@@ -22,7 +18,7 @@ if [ ! -f "$MARKER_FILE" ]; then
   keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
 
   echo ">>> keystone-manage bootstrap"
-  keystone-manage bootstrap --bootstrap-password "${KEYSTONE_ENTRYPOINT_ADMIN_PASSWORD}" \
+  keystone-manage bootstrap --bootstrap-password admin \
     --bootstrap-admin-url http://localhost:5000/v3/ \
     --bootstrap-internal-url http://localhost:5000/v3/ \
     --bootstrap-public-url http://localhost:5000/v3/ \
@@ -46,7 +42,7 @@ if [ ! -f "$MARKER_FILE" ]; then
 
   echo ">>> Esporto variabili OS_* (come da guida)"
   export OS_USERNAME=admin
-  export OS_PASSWORD="${KEYSTONE_ENTRYPOINT_ADMIN_PASSWORD}"
+  export OS_PASSWORD=admin
   export OS_PROJECT_NAME=admin
   export OS_USER_DOMAIN_NAME=Default
   export OS_PROJECT_DOMAIN_NAME=Default
@@ -89,23 +85,9 @@ if [ ! -f "$MARKER_FILE" ]; then
   openstack service create iot \
     --name Iotronic || true
 
-  IOT_INTERNAL_URL="http://iotronic-conductor.default.svc.cluster.local:8812"
-  IOT_PUBLIC_URL="http://iotronic-conductor.default.svc.cluster.local:8812"
-  IOT_ID=$(openstack service list -f value -c ID -c Name -c Type | awk '$2=="iot" || $3=="iot" {print $1; exit}')
-  for IFACE in public internal admin; do
-    URL="$IOT_INTERNAL_URL"
-    [ "$IFACE" = "public" ] && URL="$IOT_PUBLIC_URL"
-    EP_ID=$(openstack endpoint list --service "$IOT_ID" --interface "$IFACE" -f value -c ID | head -n1)
-    if [ -n "$EP_ID" ]; then
-      openstack endpoint set --url "$URL" "$EP_ID" || true
-    else
-      openstack endpoint create --region RegionOne "$IOT_ID" "$IFACE" "$URL" || true
-    fi
-  done
-
   echo '[INFO] Iotronic User Create...'
   openstack user create iotronic \
-    --password "${KEYSTONE_ENTRYPOINT_IOTRONIC_USER_PASSWORD}" || true
+    --password unime || true
 
   echo '[INFO] Iotronic roles...'
   openstack role create admin_iot_project || true
@@ -117,7 +99,7 @@ if [ ! -f "$MARKER_FILE" ]; then
   openstack role add --project admin --user admin admin_iot_project || true
 
   openstack user create s4t-platform \
-  --password "${S4T_PLATFORM_USER_PASSWORD}" \
+  --password platform-secret \
   --domain Default || true
 
   # Gruppi specifici iot-lab nel dominio federated_domain

@@ -41,9 +41,9 @@ spec:
           - --https-certificate-key-file=/opt/keycloak/certs/keycloak.key
         env:
         - name: KEYCLOAK_ADMIN
-          value: "${KEYCLOAK_ADMIN_USERNAME}"
+          value: "admin"
         - name: KEYCLOAK_ADMIN_PASSWORD
-          value: "${KEYCLOAK_ADMIN_PASSWORD}"
+          value: "admin"
         - name: KC_DB
           value: "postgres"
         - name: KC_DB_URL_HOST
@@ -55,13 +55,11 @@ spec:
         - name: KC_DB_USERNAME
           value: "keycloak"
         - name: KC_DB_PASSWORD
-          value: "${KEYCLOAK_DB_PASSWORD}"
+          value: "password_keycloak"
         - name: KC_HOSTNAME_STRICT
           value: "false"
         - name: KC_PROXY
           value: "edge"
-        - name: KC_HEALTH_ENABLED
-          value: "true"
         ports:
         - containerPort: 8080
           name: http
@@ -147,7 +145,7 @@ spec:
         - name: POSTGRES_USER
           value: "keycloak"
         - name: POSTGRES_PASSWORD
-          value: "${KEYCLOAK_DB_PASSWORD}"
+          value: "password_keycloak"
         ports:
         - containerPort: 5432
         volumeMounts:

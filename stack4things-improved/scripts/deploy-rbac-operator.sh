@@ -17,44 +17,6 @@ echo "  DEPLOYMENT RBAC OPERATOR"
 echo "=========================================="
 echo ""
 
-TARGET_IMAGE_REPO="docker.io/mdslab/s4t-rbac-operator:latest"
-IMG="${IMG:-$TARGET_IMAGE_REPO}"
-BUILD_IMAGE="${RBAC_OPERATOR_BUILD_IMAGE:-false}"
-
-ensure_cert_manager() {
-        if kubectl get crd certificates.cert-manager.io >/dev/null 2>&1 && \
-             kubectl get crd issuers.cert-manager.io >/dev/null 2>&1; then
-                echo -e "${GREEN}✔ cert-manager CRDs already present${NC}"
-                return 0
-        fi
-
-        echo "0. Installazione cert-manager (dipendenza webhook RBAC Operator)..."
-        if ! command -v helm >/dev/null 2>&1; then
-                echo -e "${RED}ERROR: helm non disponibile, impossibile installare cert-manager${NC}"
-                return 1
-        fi
-
-        helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
-        helm repo update >/dev/null 2>&1 || true
-        helm upgrade --install cert-manager jetstack/cert-manager \
-            --namespace cert-manager --create-namespace \
-            --set crds.enabled=true \
-            --wait --timeout=5m || {
-                echo -e "${RED}ERROR: installazione cert-manager fallita${NC}"
-                return 1
-            }
-
-        kubectl wait --for=condition=Available deployment/cert-manager -n cert-manager --timeout=300s >/dev/null 2>&1 || true
-        kubectl wait --for=condition=Available deployment/cert-manager-webhook -n cert-manager --timeout=300s >/dev/null 2>&1 || true
-        kubectl wait --for=condition=Available deployment/cert-manager-cainjector -n cert-manager --timeout=300s >/dev/null 2>&1 || true
-
-        if ! kubectl get crd certificates.cert-manager.io >/dev/null 2>&1; then
-                echo -e "${RED}ERROR: cert-manager CRD certificates.cert-manager.io non trovata${NC}"
-                return 1
-        fi
-        echo -e "${GREEN}✔ cert-manager pronto${NC}"
-}
-
 # Configurazione kubeconfig
 if [ -f /etc/rancher/k3s/k3s.yaml ]; then
     export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -73,8 +35,6 @@ fi
 
 cd "$RBAC_OPERATOR_DIR"
 
-ensure_cert_manager || exit 1
-
 # 1. Installare CRDs
 echo "1. Installazione CRDs RBAC Operator..."
 make install || {
@@ -86,23 +46,22 @@ make install || {
 }
 echo -e "${GREEN}✔ CRDs installate${NC}"
 
-# 2. Build e push immagine (opzionale)
+# 2. Build e push immagine (se necessario)
 echo "2. Build immagine RBAC Operator..."
-if [ "$BUILD_IMAGE" = "true" ]; then
-    if command -v docker &> /dev/null; then
-        echo "Building image: $IMG"
-        make docker-build IMG="$IMG" || {
-            echo -e "${YELLOW}⚠️  Build Docker fallito, uso immagine pre-esistente${NC}"
-        }
-
-        echo "Pushing image: $IMG"
-        make docker-push IMG="$IMG" || echo -e "${YELLOW}⚠️  Push fallito (verifica docker login e permessi registry)${NC}"
-    else
-        echo -e "${YELLOW}⚠️  Docker non disponibile, uso immagine pre-esistente${NC}"
+if command -v docker &> /dev/null; then
+    IMG="${IMG:-localhost:5000/s4t-rbac-operator:latest}"
+    echo "Building image: $IMG"
+    make docker-build IMG="$IMG" || {
+        echo -e "${YELLOW}⚠️  Build Docker fallito, uso immagine pre-esistente${NC}"
+    }
+    
+    # Se abbiamo un registry locale, push
+    if echo "$IMG" | grep -q "localhost:5000"; then
+        make docker-push IMG="$IMG" || echo -e "${YELLOW}⚠️  Push fallito (registry locale potrebbe non essere disponibile)${NC}"
     fi
 else
-    echo "Skipping build/push locale (RBAC_OPERATOR_BUILD_IMAGE=false)."
-    echo "Using remote image: $IMG"
+    echo -e "${YELLOW}⚠️  Docker non disponibile, uso immagine pre-esistente${NC}"
+    IMG="${IMG:-quay.io/s4t/rbac-operator:latest}"
 fi
 
 # 3. Deploy RBAC Operator
@@ -112,17 +71,12 @@ if [ -f "dist/install.yaml" ]; then
     kubectl apply -f dist/install.yaml
 else
     # Altrimenti usa make deploy
-    make deploy IMG="${IMG:-$TARGET_IMAGE_REPO}" || {
-        echo -e "${YELLOW}⚠️  Make deploy fallito, provo deploy fallback con kustomize build...${NC}"
-        if [ -x "bin/kustomize" ]; then
-            (cd config/manager && "$RBAC_OPERATOR_DIR/bin/kustomize" edit set image controller="${IMG:-$TARGET_IMAGE_REPO}")
-            "$RBAC_OPERATOR_DIR/bin/kustomize" build config/default | kubectl apply -f -
-        elif command -v kustomize >/dev/null 2>&1; then
-            (cd config/manager && kustomize edit set image controller="${IMG:-$TARGET_IMAGE_REPO}")
-            kustomize build config/default | kubectl apply -f -
-        else
-            kubectl kustomize config/default | kubectl apply -f -
-        fi
+    make deploy IMG="${IMG:-localhost:5000/s4t-rbac-operator:latest}" || {
+        echo -e "${YELLOW}⚠️  Make deploy fallito, provo deploy manuale...${NC}"
+        # Deploy manuale
+        kubectl apply -f config/rbac/ || true
+        kubectl apply -f config/manager/ || true
+        kubectl apply -f config/webhook/ || true
     }
 fi
 

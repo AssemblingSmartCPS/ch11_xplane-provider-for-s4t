@@ -69,188 +69,8 @@ ensure_kubeconfig() {
   fi
 }
 
-### Reconcile Keystone iot service catalog ###
-reconcile_iot_catalog() {
-  local phase_label="$1"
-  local keystone_namespace="$2"
-  local iotronic_service="$3"
-  local iotronic_port="$4"
-
-  local retries=12
-  local delay_seconds=10
-  local success=0
-
-  echo "🔧 Reconciling Keystone iot service catalog endpoints (${phase_label})..."
-
-  for domain in Default default; do
-    for attempt in $(seq 1 "$retries"); do
-      if kubectl exec -n "$keystone_namespace" deploy/keystone -- env \
-        OS_AUTH_URL="http://127.0.0.1:5000/v3" \
-        OS_USERNAME="${STACK4THINGS_ADMIN_USER}" \
-        OS_PASSWORD="${STACK4THINGS_ADMIN_PASSWORD}" \
-        OS_PROJECT_NAME="${STACK4THINGS_ADMIN_USER}" \
-        OS_USER_DOMAIN_NAME="$domain" \
-        OS_PROJECT_DOMAIN_NAME="$domain" \
-        OS_IDENTITY_API_VERSION="3" \
-        IOT_INTERNAL_URL="http://${iotronic_service}:${iotronic_port}" \
-        IOT_PUBLIC_URL="http://${iotronic_service}:${iotronic_port}" \
-        sh -ec '
-          openstack token issue >/dev/null
-
-          IOT_ID=$(openstack service list -f value -c ID -c Name -c Type | grep -E "[[:space:]]iot$" | head -n1 | awk "{print \$1}")
-          if [ -z "$IOT_ID" ]; then
-            IOT_ID=$(openstack service create --name Iotronic iot -f value -c id)
-          fi
-
-          for IFACE in public internal admin; do
-            URL="$IOT_INTERNAL_URL"
-            [ "$IFACE" = "public" ] && URL="$IOT_PUBLIC_URL"
-            EP_ID=$(openstack endpoint list --service "$IOT_ID" --interface "$IFACE" -f value -c ID | head -n1)
-            if [ -n "$EP_ID" ]; then
-              openstack endpoint set --url "$URL" "$EP_ID" >/dev/null
-            else
-              openstack endpoint create --region RegionOne "$IOT_ID" "$IFACE" "$URL" >/dev/null
-            fi
-          done
-
-          for ROLE in admin_iot_project manager_iot_project user_iot; do
-            openstack role show "$ROLE" >/dev/null 2>&1 || openstack role create "$ROLE" >/dev/null
-          done
-          openstack role add --project admin --user admin admin_iot_project >/dev/null 2>&1 || true
-          openstack role add --project admin --user admin user_iot >/dev/null 2>&1 || true
-
-          openstack endpoint list --service "$IOT_ID" -f value -c Interface -c URL
-        ' >/dev/null 2>&1; then
-        echo -e "${GREEN}✔ Keystone iot catalog reconciliation completed (${phase_label}, domain=${domain}, attempt=${attempt})${NC}"
-        success=1
-        break
-      fi
-
-      sleep "$delay_seconds"
-    done
-
-    if [ "$success" -eq 1 ]; then
-      break
-    fi
-  done
-
-  if [ "$success" -ne 1 ]; then
-    echo -e "${YELLOW}⚠️  Could not reconcile iot service catalog automatically (${phase_label})${NC}"
-  fi
-}
-
-### Ensure wstun SSL files in PVC ###
-ensure_wstun_ssl_files() {
-  local cert_dir="$1"
-  local namespace="default"
-  local pvc_name="iotronic-ssl"
-  local helper_pod="ssl-fixer"
-  local have_crossbar_certs=false
-
-  if [ ! -f "${cert_dir}/iotronic_CA.pem" ]; then
-    echo -e "${YELLOW}⚠️  Missing iotronic_CA files in ${cert_dir}, skipping wstun SSL PVC sync${NC}"
-    return
-  fi
-
-  if [ -f "${cert_dir}/crossbar.key" ] && [ -f "${cert_dir}/crossbar.pem" ]; then
-    have_crossbar_certs=true
-  else
-    echo -e "${YELLOW}⚠️  Missing crossbar.key/crossbar.pem in ${cert_dir}, Crossbar SSL sync will be partial${NC}"
-  fi
-
-  for _ in {1..24}; do
-    if kubectl get pvc "${pvc_name}" -n "${namespace}" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 5
-  done
-
-  if ! kubectl get pvc "${pvc_name}" -n "${namespace}" >/dev/null 2>&1; then
-    echo -e "${YELLOW}⚠️  PVC ${pvc_name} not found in namespace ${namespace}, skipping SSL PVC sync${NC}"
-    return
-  fi
-
-  echo "🔧 Ensuring SSL files in PVC ${pvc_name} (wstun + crossbar)..."
-  kubectl delete pod "${helper_pod}" -n "${namespace}" --ignore-not-found >/dev/null 2>&1 || true
-
-  cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${helper_pod}
-  namespace: ${namespace}
-spec:
-  restartPolicy: Never
-  containers:
-  - name: fixer
-    image: alpine:3.20
-    command: ["/bin/sh", "-c", "sleep 3600"]
-    volumeMounts:
-    - name: ssl
-      mountPath: /ssl
-  volumes:
-  - name: ssl
-    persistentVolumeClaim:
-      claimName: ${pvc_name}
-EOF
-
-  kubectl wait --for=condition=Ready pod/${helper_pod} -n "${namespace}" --timeout=120s >/dev/null 2>&1 || {
-    echo -e "${YELLOW}⚠️  Could not start helper pod ${helper_pod}, skipping wstun SSL PVC sync${NC}"
-    return
-  }
-
-  kubectl cp "${cert_dir}/iotronic_CA.pem" "${namespace}/${helper_pod}:/ssl/iotronic_CA.pem" >/dev/null 2>&1 || true
-  if [ -f "${cert_dir}/iotronic_CA.key" ]; then
-    kubectl cp "${cert_dir}/iotronic_CA.key" "${namespace}/${helper_pod}:/ssl/iotronic_CA.key" >/dev/null 2>&1 || true
-  fi
-  if [ "${have_crossbar_certs}" = true ]; then
-    kubectl cp "${cert_dir}/crossbar.key" "${namespace}/${helper_pod}:/ssl/crossbar.key" >/dev/null 2>&1 || true
-    kubectl cp "${cert_dir}/crossbar.pem" "${namespace}/${helper_pod}:/ssl/crossbar.pem" >/dev/null 2>&1 || true
-  fi
-
-  kubectl exec -n "${namespace}" "${helper_pod}" -- sh -lc '
-    chmod 600 /ssl/iotronic_CA.key 2>/dev/null || true
-    chmod 644 /ssl/iotronic_CA.pem 2>/dev/null || true
-    chmod 644 /ssl/crossbar.key 2>/dev/null || true
-    chmod 644 /ssl/crossbar.pem 2>/dev/null || true
-    ls -l /ssl
-  ' >/dev/null 2>&1 || true
-
-  kubectl rollout restart deployment/iotronic-wstun -n "${namespace}" >/dev/null 2>&1 || true
-  kubectl rollout status deployment/iotronic-wstun -n "${namespace}" --timeout=180s >/dev/null 2>&1 || true
-
-  if [ "${have_crossbar_certs}" = true ]; then
-    kubectl rollout restart deployment/crossbar -n "${namespace}" >/dev/null 2>&1 || true
-    kubectl rollout status deployment/crossbar -n "${namespace}" --timeout=180s >/dev/null 2>&1 || true
-  fi
-
-  kubectl delete pod "${helper_pod}" -n "${namespace}" --ignore-not-found >/dev/null 2>&1 || true
-  echo -e "${GREEN}✔ SSL files synced to PVC and dependent deployments restarted${NC}"
-}
-
 ### Main deployment ###
 main() {
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  CERT_DIR="${SCRIPT_DIR}/keycloak-keystone-integration/keycloak-config/certs"
-
-  # Load local credentials file (must be present).
-  ENV_FILE="${SCRIPT_DIR}/../.env"
-  if [ ! -f "$ENV_FILE" ]; then
-    echo -e "${RED}ERROR: .env not found at: $ENV_FILE${NC}"
-    echo -e "${YELLOW}Create it or copy from .env.example${NC}"
-    exit 1
-  fi
-
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-
-  if ! command -v envsubst >/dev/null 2>&1; then
-    echo -e "${RED}ERROR: envsubst not found (install gettext-base)${NC}"
-    exit 1
-  fi
-
   detect_ip_range
   ensure_kubeconfig
 
@@ -328,20 +148,8 @@ EOF
   #################################
   step "3" "Deploying Stack4Things Core Services"
   #################################
-  echo "📦 Rendering + applying core services from 'yaml_file/'..."
-  RENDERED_DIR="${SCRIPT_DIR}/.tmp/rendered-yaml_file"
-  rm -rf "$RENDERED_DIR"
-  mkdir -p "$RENDERED_DIR"
-
-  # Restrict envsubst substitutions to placeholders we introduced.
-  ENV_SUBST_VARS='$STACK4THINGS_ADMIN_USER $STACK4THINGS_ADMIN_PASSWORD $KEYCLOAK_ADMIN_USERNAME $KEYCLOAK_ADMIN_PASSWORD $KEYCLOAK_DB_PASSWORD $KEYSTONE_DB_ROOT_PASSWORD $KEYSTONE_DB_PASSWORD $IOTRONIC_DB_HOST $IOTRONIC_DB_NAME $IOTRONIC_DB_USER $IOTRONIC_DB_PASSWORD $IOTRONIC_DB_ROOT_PASSWORD $RABBITMQ_DEFAULT_USER $RABBITMQ_DEFAULT_PASSWORD $NEUTRON_PASSWORD $DESIGNATE_PASSWORD'
-
-  for f in "${SCRIPT_DIR}"/yaml_file/*.yaml; do
-    [ -f "$f" ] || continue
-    envsubst "$ENV_SUBST_VARS" < "$f" > "${RENDERED_DIR}/$(basename "$f")"
-  done
-
-  kubectl apply -f "$RENDERED_DIR"
+  echo "📦 Applying core services from 'yaml_file/'..."
+  kubectl apply -f yaml_file/
 
   echo "⏳ Waiting for services to be ready..."
   # Wait for critical services
@@ -355,9 +163,6 @@ EOF
 
   echo "📦 Applying Istio VirtualServices and Gateways from 'istioconf/'..."
   kubectl apply -f istioconf/
-
-  # Ensure SSL files are available early so Crossbar can listen immediately.
-  ensure_wstun_ssl_files "${CERT_DIR}"
 
   #################################
   step "3.1" "Disabling Istio Sidecar Injection for iotronic-ui"
@@ -400,50 +205,33 @@ EOF
     cat <<EOF | kubectl patch svc istio-ingress -n istio-ingress --patch-file /dev/stdin --type merge
 spec:
   ports:
-    - name: status-port
-      nodePort: 31965
-      port: 15021
-      targetPort: 15021
-      protocol: TCP
-    - name: http2
-      nodePort: 31540
-      port: 80
-      targetPort: 80
-      protocol: TCP
-    - name: https
-      nodePort: 31702
-      port: 443
-      targetPort: 443
-      protocol: TCP
     - name: tcp-crossbar
-      nodePort: 32298
       port: 8181
       targetPort: 8181
       protocol: TCP
     - name: lr
-      nodePort: 30772
       port: 1474
       targetPort: 1474
       protocol: TCP
     - name: conductor
-      nodePort: 31711
       port: 8812
       targetPort: 8812
       protocol: TCP
     - name: wstun
-      nodePort: 30147
       port: 8080
       targetPort: 8080
       protocol: TCP
     - name: rabbit
-      nodePort: 30320
       port: 5672
       targetPort: 5672
       protocol: TCP
     - name: rabbitui
-      nodePort: 30998
       port: 15672
       targetPort: 15672
+      protocol: TCP
+    - name: iotronic-ui
+      port: 8070
+      targetPort: 8070
       protocol: TCP
 EOF
     echo -e "${GREEN}✔ Ingress ports updated for Stack4Things services.${NC}"
@@ -474,80 +262,39 @@ EOF
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   CROSSPLANE_PROVIDER_DIR=""
   
-  for path in "${SCRIPT_DIR}/../../crossplane-provider" "${SCRIPT_DIR}/../crossplane-provider" "$(dirname "${SCRIPT_DIR}")/crossplane-provider"; do
-    if [ -d "$path" ] && [ -f "$path/Makefile" ]; then
+  for path in "${SCRIPT_DIR}/../crossplane-provider" "${SCRIPT_DIR}/../../crossplane-provider" "$(dirname "${SCRIPT_DIR}")/crossplane-provider"; do
+    if [ -d "$path" ]; then
       CROSSPLANE_PROVIDER_DIR="$path"
       break
     fi
   done
   
-  PROVIDER_IMAGE="docker.io/mdslab/provider-s4t:latest"
-
   if [ -n "$CROSSPLANE_PROVIDER_DIR" ] && [ -d "$CROSSPLANE_PROVIDER_DIR" ]; then
-    echo "📦 Installing Crossplane Provider S4T from: $CROSSPLANE_PROVIDER_DIR"
-    echo "   Using remote image: $PROVIDER_IMAGE"
+    echo "📦 Building and installing Crossplane Provider S4T from: $CROSSPLANE_PROVIDER_DIR"
     ORIGINAL_DIR=$(pwd)
     cd "$CROSSPLANE_PROVIDER_DIR"
-
-    # Some repo copies miss the image output path expected by make.
-    # Create it proactively to avoid build failures.
-    if [ ! -d "cluster/images/provider-s4t" ]; then
-      mkdir -p "cluster/images/provider-s4t" || true
+    
+    # Build provider image (optional - skip if image already exists)
+    if [ -f "Makefile" ]; then
+      echo "🔨 Building provider..."
+      if make build 2>&1; then
+        echo "✔ Provider built successfully"
+        make push 2>&1 || echo -e "${YELLOW}⚠️  Image push skipped (using local image)${NC}"
+      else
+        echo -e "${YELLOW}⚠️  Build failed, trying to install existing provider...${NC}"
+      fi
     fi
     
-    # Skip local build/push to avoid docker/buildx incompatibilities.
-    # We pin the provider to a known-good remote image instead.
-    echo "⏭️  Skipping local provider build/push"
-    
     # Install provider using kubectl (preferred method)
-    if [ -d "package/crds" ]; then
+    if [ -f "package/crds" ] || [ -d "package/crds" ]; then
       echo "📦 Installing provider CRDs..."
       kubectl apply -f package/crds/ 2>&1 | grep -v "Warning" || true
     fi
     
     # Install provider using Provider resource
     if [ -f "package/crossplane.yaml" ]; then
-      sed -i "s#^\([[:space:]]*package:[[:space:]]*\).*#\1${PROVIDER_IMAGE}#" package/crossplane.yaml
       echo "📦 Installing provider resource..."
       kubectl apply -f package/crossplane.yaml 2>&1 | grep -v "Warning" || true
-    fi
-
-    # Some provider images require a revision-scoped ClusterRole that may be missing.
-    # Wait briefly for Crossplane to create the binding, then ensure the role exists.
-    PROVIDER_SYSTEM_ROLE=""
-    for _ in $(seq 1 30); do
-      PROVIDER_SYSTEM_ROLE=$(kubectl get clusterrolebinding -o name 2>/dev/null \
-        | sed 's#clusterrolebinding.rbac.authorization.k8s.io/##' \
-        | grep '^crossplane:provider:provider-s4t-.*:system$' \
-        | head -1 || true)
-      [ -n "$PROVIDER_SYSTEM_ROLE" ] && break
-      sleep 2
-    done
-
-    if [ -n "$PROVIDER_SYSTEM_ROLE" ] && ! kubectl get clusterrole "$PROVIDER_SYSTEM_ROLE" >/dev/null 2>&1; then
-      echo "🔧 Creating missing provider RBAC role: $PROVIDER_SYSTEM_ROLE"
-      kubectl apply -f - <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: $PROVIDER_SYSTEM_ROLE
-rules:
-- apiGroups: ["iot.s4t.crossplane.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["s4t.crossplane.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: [""]
-  resources: ["events","configmaps","secrets"]
-  verbs: ["get","list","watch","create","update","patch"]
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  verbs: ["get","list","watch","create","update","patch"]
-EOF
-    elif [ -z "$PROVIDER_SYSTEM_ROLE" ]; then
-      echo -e "${YELLOW}⚠️  Provider revision binding not found yet; RBAC role check skipped.${NC}"
-      echo "   If provider crashes with forbidden/list errors, re-run this deploy step."
     fi
     
     # Alternative: Install via Helm if chart exists
@@ -574,95 +321,36 @@ EOF
   step "7" "Configuring Crossplane Provider"
   #################################
   echo "📝 Configuring ProviderConfig..."
-
-  TMP_DIR="${SCRIPT_DIR}/.tmp"
-  mkdir -p "${TMP_DIR}" || {
-    echo -e "${RED}❌ ERROR: cannot create temp dir ${TMP_DIR}${NC}"
-    exit 1
-  }
   
   # Wait for services to be ready
   echo "⏳ Waiting for IoTronic services to be ready..."
   kubectl wait --for=condition=available deployment/iotronic-conductor -n default --timeout=300s || true
-
-  KEYSTONE_NAMESPACE="default"
-  if kubectl get deploy keystone -n keystone >/dev/null 2>&1; then
-    KEYSTONE_NAMESPACE="keystone"
-  elif kubectl get deploy keystone -n default >/dev/null 2>&1; then
-    KEYSTONE_NAMESPACE="default"
-  fi
-
-  if kubectl get deploy keystone -n "$KEYSTONE_NAMESPACE" >/dev/null 2>&1; then
-    kubectl wait --for=condition=available deployment/keystone -n "$KEYSTONE_NAMESPACE" --timeout=300s || true
-  else
-    echo -e "${YELLOW}⚠️  Keystone deployment not found in expected namespaces (keystone/default), continuing...${NC}"
-  fi
+  kubectl wait --for=condition=available deployment/keystone -n default --timeout=300s || true
   
   # Wait for conductor pod to be running
   echo "⏳ Waiting for iotronic-conductor pod to be running..."
   kubectl wait --for=condition=ready pod -l io.kompose.service=iotronic-conductor -n default --timeout=300s || true
   sleep 10  # Additional buffer for conductor to fully start
-
-  if kubectl get svc keystone -n keystone >/dev/null 2>&1; then
-    KEYSTONE_NAMESPACE="keystone"
-  elif kubectl get svc keystone -n default >/dev/null 2>&1; then
-    KEYSTONE_NAMESPACE="default"
-  fi
-  KEYSTONE_SERVICE="keystone.${KEYSTONE_NAMESPACE}.svc.cluster.local"
-  KEYSTONE_PORT=$(kubectl get svc keystone -n "$KEYSTONE_NAMESPACE" -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "5000")
+  
+  KEYSTONE_SERVICE="keystone.default.svc.cluster.local"
+  KEYSTONE_PORT=$(kubectl get svc keystone -n default -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "5000")
   IOTRONIC_SERVICE="iotronic-conductor.default.svc.cluster.local"
   IOTRONIC_PORT=$(kubectl get svc iotronic-conductor -n default -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "8812")
-
-  # Ensure provider runtime uses cluster-reachable Keystone endpoint and
-  # local proxy compatibility for controllers that still target 127.0.0.1.
-  cat > "${TMP_DIR}/provider-s4t-runtime.yaml" <<EOF
-apiVersion: pkg.crossplane.io/v1beta1
-kind: DeploymentRuntimeConfig
-metadata:
-  name: provider-s4t-runtime
-spec:
-  deploymentTemplate:
-    spec:
-      selector: {}
-      template:
-        spec:
-          containers:
-            - name: package-runtime
-              env:
-                - name: OS_AUTH_URL
-                  value: "http://${KEYSTONE_SERVICE}:${KEYSTONE_PORT}/v3"
-                - name: OS_IDENTITY_API_VERSION
-                  value: "3"
-            - name: local-s4t-proxy
-              image: alpine/socat:1.8.0.0
-              command: ["/bin/sh", "-ec"]
-              args:
-                - |
-                  socat TCP-LISTEN:5000,fork,reuseaddr TCP:${KEYSTONE_SERVICE}:${KEYSTONE_PORT} &
-                  socat TCP-LISTEN:8812,fork,reuseaddr TCP:${IOTRONIC_SERVICE}:${IOTRONIC_PORT}
-EOF
-  kubectl apply -f "${TMP_DIR}/provider-s4t-runtime.yaml" 2>&1 | grep -v "Warning" || true
-  if kubectl get provider.pkg.crossplane.io provider-s4t >/dev/null 2>&1; then
-    kubectl patch provider.pkg.crossplane.io provider-s4t --type merge -p \
-      '{"spec":{"runtimeConfigRef":{"apiVersion":"pkg.crossplane.io/v1beta1","kind":"DeploymentRuntimeConfig","name":"provider-s4t-runtime"}}}' \
-      >/dev/null 2>&1 || true
-    echo -e "${GREEN}✔ Provider runtime configured (provider-s4t-runtime)${NC}"
-  fi
   
   # Create Secret
   if ! kubectl get secret -n default s4t-credentials >/dev/null 2>&1; then
-    cat > "${TMP_DIR}/s4t-credentials.json" <<EOF
+    cat > /tmp/s4t-credentials.json <<EOF
 {
   "endpoint": "http://${IOTRONIC_SERVICE}:${IOTRONIC_PORT}",
   "keystoneEndpoint": "http://${KEYSTONE_SERVICE}:${KEYSTONE_PORT}/v3",
-  "username": "${STACK4THINGS_ADMIN_USER}",
-  "password": "${STACK4THINGS_ADMIN_PASSWORD}",
+  "username": "admin",
+  "password": "s4t",
   "domain": "default",
   "project": "admin"
 }
 EOF
     kubectl create secret generic s4t-credentials \
-      --from-file=credentials.json="${TMP_DIR}/s4t-credentials.json" \
+      --from-file=credentials.json=/tmp/s4t-credentials.json \
       -n default 2>&1 | grep -v "Warning" || true
     echo -e "${GREEN}✔ Secret s4t-credentials created${NC}"
   else
@@ -671,7 +359,7 @@ EOF
   
   # Create ProviderConfig
   if ! kubectl get providerconfig s4t-provider-config >/dev/null 2>&1; then
-    cat > "${TMP_DIR}/s4t-provider-config.yaml" <<EOF
+    cat > /tmp/s4t-provider-config.yaml <<EOF
 apiVersion: s4t.crossplane.io/v1alpha1
 kind: ProviderConfig
 metadata:
@@ -685,7 +373,7 @@ spec:
       key: credentials.json
   keystoneEndpoint: "http://${KEYSTONE_SERVICE}:${KEYSTONE_PORT}/v3"
 EOF
-    kubectl apply -f "${TMP_DIR}/s4t-provider-config.yaml" 2>&1 | grep -v "Warning" || true
+    kubectl apply -f /tmp/s4t-provider-config.yaml 2>&1 | grep -v "Warning" || true
     echo -e "${GREEN}✔ ProviderConfig s4t-provider-config created${NC}"
   else
     echo "✔ ProviderConfig s4t-provider-config already exists"
@@ -693,7 +381,7 @@ EOF
   
   # Create ProviderConfig for domain
   if ! kubectl get providerconfig s4t-provider-domain >/dev/null 2>&1; then
-    cat > "${TMP_DIR}/s4t-provider-domain.yaml" <<EOF
+    cat > /tmp/s4t-provider-domain.yaml <<EOF
 apiVersion: s4t.crossplane.io/v1alpha1
 kind: ProviderConfig
 metadata:
@@ -707,20 +395,11 @@ spec:
       key: credentials.json
   keystoneEndpoint: "http://${KEYSTONE_SERVICE}:${KEYSTONE_PORT}/v3"
 EOF
-    kubectl apply -f "${TMP_DIR}/s4t-provider-domain.yaml" 2>&1 | grep -v "Warning" || true
+    kubectl apply -f /tmp/s4t-provider-domain.yaml 2>&1 | grep -v "Warning" || true
     echo -e "${GREEN}✔ ProviderConfig s4t-provider-domain created${NC}"
   else
     echo "✔ ProviderConfig s4t-provider-domain already exists"
   fi
-
-  rm -f "${TMP_DIR}/provider-s4t-runtime.yaml" \
-        "${TMP_DIR}/s4t-credentials.json" \
-        "${TMP_DIR}/s4t-provider-config.yaml" \
-        "${TMP_DIR}/s4t-provider-domain.yaml" 2>/dev/null || true
-
-  # Reconcile Keystone service catalog for IoTronic so UI/API consumers
-  # resolve a reachable endpoint from inside the cluster.
-  reconcile_iot_catalog "pre-step-8" "$KEYSTONE_NAMESPACE" "$IOTRONIC_SERVICE" "$IOTRONIC_PORT"
 
   #################################
   step "7.1" "Fixing Wampagent Duplicates Issue"
@@ -789,12 +468,6 @@ EOF
     echo -e "${YELLOW}⚠️  deploy-keycloak-keystone.sh not found, skipping...${NC}"
   fi
 
-  ensure_wstun_ssl_files "${CERT_DIR}"
-
-  # Keystone can become available only after step 8 in some environments.
-  # Reconcile iot endpoints again to ensure UI/API always see a reachable catalog.
-  reconcile_iot_catalog "post-step-8" "$KEYSTONE_NAMESPACE" "$IOTRONIC_SERVICE" "$IOTRONIC_PORT"
-
   #################################
   step "9" "Deploying RBAC Operator"
   #################################
@@ -862,13 +535,13 @@ EOF
   fi
   echo ""
   echo "Dashboard credentials:"
-  echo "  Username: ${STACK4THINGS_ADMIN_USER}"
-  echo "  Password: ${STACK4THINGS_ADMIN_PASSWORD}"
+  echo "  Username: admin"
+  echo "  Password: s4t"
   echo ""
   echo "Keycloak Admin Console:"
   echo "  URL: http://<node-ip>:<nodeport>/ (port forwarded from keycloak service)"
-  echo "  Username: ${KEYCLOAK_ADMIN_USERNAME}"
-  echo "  Password: ${KEYCLOAK_ADMIN_PASSWORD}"
+  echo "  Username: admin"
+  echo "  Password: admin"
   echo ""
   echo "Note: settings.json is automatically configured with:"
   echo "  - Board code (from OpenStack registration)"

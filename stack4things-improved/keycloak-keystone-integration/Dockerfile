@@ -1,4 +1,4 @@
-FROM docker.io/mdslab/iotronic-keystone:latest
+FROM mdslab/iotronic-keystone
 
 # Passiamo a root per installare i pacchetti
 USER root

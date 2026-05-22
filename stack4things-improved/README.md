@@ -468,11 +468,8 @@ To run the deployment:
 
 ```bash
 cd stack4things-improved
-./scripts/preflight-deploy.sh
 ./deploy-complete-improved.sh
 ```
-
-If preflight reports blockers, fix them first and rerun preflight until it passes.
 
 The script automatically:
 - Checks and installs prerequisites (MetalLB, Istio if needed)

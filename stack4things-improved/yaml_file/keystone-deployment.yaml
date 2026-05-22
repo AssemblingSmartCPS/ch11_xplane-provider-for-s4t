@@ -35,13 +35,13 @@ spec:
         image: mariadb:10.6
         env:
         - name: MARIADB_ROOT_PASSWORD
-          value: "${KEYSTONE_DB_ROOT_PASSWORD}"
+          value: "root_password"
         - name: MARIADB_DATABASE
           value: "keystone"
         - name: MARIADB_USER
           value: "keystone"
         - name: MARIADB_PASSWORD
-          value: "${KEYSTONE_DB_PASSWORD}"
+          value: "password_keystone"
         ports:
         - containerPort: 3306
         volumeMounts:
@@ -83,22 +83,9 @@ spec:
     spec:
       containers:
       - name: keystone
-        image: docker.io/mdslab/iotronic-keystone:latest
+        image: mdslab/iotronic-keystone:latest
         imagePullPolicy: IfNotPresent
-        command:
-        - /bin/sh
-        - -c
-        - |
-          set -e
-          keystone-manage db_sync
-          keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
-          keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
-          keystone-manage bootstrap --bootstrap-password ${STACK4THINGS_ADMIN_PASSWORD} \
-            --bootstrap-admin-url http://keystone.keystone.svc.cluster.local:5000/v3/ \
-            --bootstrap-internal-url http://keystone.keystone.svc.cluster.local:5000/v3/ \
-            --bootstrap-public-url http://keystone.keystone.svc.cluster.local:5000/v3/ \
-            --bootstrap-region-id RegionOne || true
-          exec apache2ctl -D FOREGROUND
+        command: ["/usr/local/bin/keystone-entrypoint.sh"]
         ports:
         - containerPort: 5000
           name: api
@@ -106,7 +93,7 @@ spec:
         - name: DB_HOST
           value: "keystone-db.keystone.svc.cluster.local"
         - name: DB_PASSWORD
-          value: "${KEYSTONE_DB_PASSWORD}"
+          value: "password_keystone"
         volumeMounts:
         - name: keystone-config
           mountPath: /etc/keystone/keystone.conf
@@ -124,17 +111,13 @@ spec:
           httpGet:
             path: /v3
             port: 5000
-          initialDelaySeconds: 60
-          timeoutSeconds: 5
-          failureThreshold: 12
+          initialDelaySeconds: 30
           periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /v3
             port: 5000
-          initialDelaySeconds: 180
-          timeoutSeconds: 5
-          failureThreshold: 6
+          initialDelaySeconds: 60
           periodSeconds: 10
       volumes:
       - name: keystone-config

@@ -20,8 +20,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"strings"
 
 	"encoding/json"
 	s4t "github.com/MIKE9708/s4t-sdk-go/pkg/api"
@@ -59,68 +57,21 @@ type S4TService struct {
 }
 
 var (
-	newS4TService = func(creds []byte, keystoneEndpoint string) (*S4TService, error) {
+	newS4TService = func(creds []byte) (*S4TService, error) {
 		var result map[string]string
 		err := json.Unmarshal(creds, &result)
 		if err != nil {
 			return nil, errors.Wrap(err, errNewClient)
 		}
-
-		if keystoneEndpoint != "" {
-			os.Setenv("OS_AUTH_URL", keystoneEndpoint)
-		} else {
-			os.Setenv("OS_AUTH_URL", "http://keystone.default.svc.cluster.local:5000/v3")
-		}
-		os.Setenv("OS_IDENTITY_API_VERSION", "3")
-
 		auth_req := read_config.FormatAuthRequ(
 			result["username"],
 			result["password"],
 			result["domain"],
 		)
-
-		if keystoneEndpoint != "" {
-			os.Setenv("OS_AUTH_URL", keystoneEndpoint)
-		} else {
-			os.Setenv("OS_AUTH_URL", "http://keystone.default.svc.cluster.local:5000/v3")
-		}
-
-		endpoint := keystoneEndpoint
-		if endpoint == "" {
-			endpoint = "http://keystone.default.svc.cluster.local:5000/v3"
-		}
-		if strings.HasSuffix(endpoint, "/v3") {
-			endpoint = strings.TrimSuffix(endpoint, "/v3")
-		}
-
-		scheme := "http://"
-		if strings.HasPrefix(endpoint, "https://") {
-			scheme = "https://"
-			endpoint = strings.TrimPrefix(endpoint, "https://")
-		} else if strings.HasPrefix(endpoint, "http://") {
-			endpoint = strings.TrimPrefix(endpoint, "http://")
-		}
-		if idx := strings.Index(endpoint, ":"); idx != -1 {
-			endpoint = endpoint[:idx]
-		}
-		keystoneHost := scheme + endpoint
-
-		s4t_client := s4t.NewClient(keystoneHost)
-		s4t_client.Port = "8812"
-		s4t_client.AuthPort = "5000"
-
-		token, err := s4t_client.Authenticate(s4t_client, auth_req)
-		if err != nil {
-			return nil, errors.Wrap(err, errNewClient)
-		}
-		s4t_client.AuthToken = token
-
-		iotronicHost := scheme + "iotronic-conductor.default.svc.cluster.local"
-		s4t_client.Endpoint = iotronicHost
-
+		s4t_client, err := s4t.GetClientConnection(*auth_req)
 		return &S4TService{
 			S4tClient: s4t_client,
-		}, nil
+		}, err
 	}
 )
 
@@ -154,7 +105,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 type connector struct {
 	kube         client.Client
 	usage        resource.Tracker
-	newServiceFn func(creds []byte, keystoneEndpoint string) (*S4TService, error)
+	newServiceFn func(creds []byte) (*S4TService, error)
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
@@ -176,13 +127,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	if err != nil {
 		return nil, errors.Wrap(err, errGetCreds)
 	}
-
-	keystoneEndpoint := pc_domain.Spec.KeystoneEndpoint
-	if keystoneEndpoint == "" {
-		keystoneEndpoint = "http://keystone.default.svc.cluster.local:5000/v3"
-	}
-
-	svc, err := c.newServiceFn(data_domain, keystoneEndpoint)
+	svc, err := c.newServiceFn(data_domain)
 	if err != nil {
 		return nil, errors.Wrap(err, errNewClient)
 	}

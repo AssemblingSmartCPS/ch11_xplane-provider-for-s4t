@@ -175,7 +175,7 @@ EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 #EMAIL_HOST = 'smtp.my-company.com'
 #EMAIL_PORT = 25
 #EMAIL_HOST_USER = 'djangomail'
-#EMAIL_HOST_PASSWORD = '${EMAIL_HOST_PASSWORD}'
+#EMAIL_HOST_PASSWORD = 'top-secret!'
 
 # For multiple regions uncomment this configuration, and add (endpoint, title).
 #AVAILABLE_REGIONS = [
@@ -183,7 +183,7 @@ EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 #    ('http://cluster2.example.com:5000/v3', 'cluster2'),
 #]
 
-OPENSTACK_HOST = "keystone.keystone.svc.cluster.local"
+OPENSTACK_HOST = "keystone"
 OPENSTACK_KEYSTONE_URL = "http://%s:5000/v3" % OPENSTACK_HOST
 OPENSTACK_KEYSTONE_DEFAULT_ROLE = "admin"
 
