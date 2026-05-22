@@ -1,9 +1,4 @@
-/.cache
-/.work
-/_output
-cover.out
-/vendor
-/.vendor-new
-.vscode
-.idea
-.DS_Store
+.env
+.env.local
+.env.*.local
+

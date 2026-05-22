@@ -1,38 +1,26 @@
-# provider-s4t
+# Unified Deploy: Stack4Things + Crossplane
 
-`provider-s4t` is a minimal [Crossplane](https://crossplane.io/) Provider
-that is meant to be used as a s4t for implementing new Providers. It comes
-with the following features that are meant to be refactored:
+Questa cartella raccoglie in un unico punto tutto il necessario per il deploy di S4T e Crossplane.
 
-- A `ProviderConfig` type that only points to a credentials `Secret`.
-- A `MyType` resource type that serves as an example managed resource.
-- A managed resource controller that reconciles `MyType` objects and simply
-  prints their configuration in its `Observe` method.
+## Struttura
 
-## Developing
+- `crossplane-provider/`: provider, package e risorse Crossplane
+- `stack4things-improved/`: deploy S4T attivo
+- `ops/`: script operativi (setup, verifica, utility)
+- `docs/`: documentazione principale consolidata
+- `scripts/`: script di migrazione/sync
+- `archive/`: materiale legacy opzionale
 
-1. Use this repository as a s4t to create a new one.
-1. Run `make submodules` to initialize the "build" Make submodule we use for CI/CD.
-1. Rename the provider by running the following command:
-```shell
-  export provider_name=MyProvider # Camel case, e.g. GitHub
-  make provider.prepare provider=${provider_name}
+## Migrazione
+
+Esegui:
+
+```bash
+bash scripts/sync-from-root.sh
 ```
-4. Add your new type by running the following command:
-```shell
-  export group=sample # lower case e.g. core, cache, database, storage, etc.
-  export type=MyType # Camel casee.g. Bucket, Database, CacheCluster, etc.
-  make provider.addtype provider=${provider_name} group=${group} kind=${type}
-```
-5. Replace the *sample* group with your new group in apis/{provider}.go
-5. Replace the *mytype* type with your new type in internal/controller/{provider}.go
-5. Replace the default controller and ProviderConfig implementations with your own
-5. Run `make reviewable` to run code generation, linters, and tests.
-5. Run `make build` to build the provider.
 
-Refer to Crossplane's [CONTRIBUTING.md] file for more information on how the
-Crossplane community prefers to work. The [Provider Development][provider-dev]
-guide may also be of use.
+Lo script copia/aggiorna i contenuti dalla root del repository nella struttura unificata.
 
-[CONTRIBUTING.md]: https://github.com/crossplane/crossplane/blob/master/CONTRIBUTING.md
-[provider-dev]: https://github.com/crossplane/crossplane/blob/master/contributing/guide-provider-development.md
+## Nota di sicurezza
+
+La migrazione e' non distruttiva: non cancella i file sorgenti dalla root.
